@@ -1,0 +1,73 @@
+package main
+
+import (
+	"fmt"
+	"net"
+	"syscall"
+	"time"
+	"unsafe"
+)
+
+// Типо сокет для получения пакетов нативно для винды
+const SIO_RCVALL = 0x98000001
+
+func main() {
+	ip := net.ParseIP("10.37.2.138").To4() // IP
+
+	// 1. Создаём необычный сокет. Он состоит из Adress Family типо айпи4, в каком виде получать данные, какие пакеты нужны то есть IP-заголовки
+	sock, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_IP)
+	if err != nil {
+		fmt.Println("Ошибка создания сокета:", err)
+		return
+	}
+	defer syscall.Closesocket(sock)
+
+	// 2. Привязываем сокет к сети
+	// Создаю пустую строку содержащую порт и адрес типо Port = 0, Addr = [0 0 0 0], приходится так делать
+	// так как в прошлой лабе net.Listen делал всё за меня
+	addr := &syscall.SockaddrInet4{}
+	copy(addr.Addr[:], ip) // Тут надо сделать срез потому что так копи работает 
+	if err := syscall.Bind(sock, addr); err != nil  { // Тут типо сначала выполняется привязка адреса к сокету а потом условие 
+		fmt.Println("Ошибка bind:", err)
+		return
+	}
+
+	// 3. Включаем режим приёма всех пакетов (аналог promiscuous mode)
+	on := uint32(1) 
+	var ret uint32 // Сколько байт вернуться в ответ
+	// Тут вызов 
+	err = syscall.WSAIoctl(sock, SIO_RCVALL,
+		(*byte)(unsafe.Pointer(&on)), uint32(unsafe.Sizeof(on)),
+		nil, 0, &ret, nil, 0)
+	if err != nil {
+		fmt.Println("Ошибка SIO_RCVALL:", err)
+		return
+	}
+	// при выходе выключаем режим обратно
+	defer func() {
+		off := uint32(0)
+		syscall.WSAIoctl(sock, SIO_RCVALL, (*byte)(unsafe.Pointer(&off)),
+			uint32(unsafe.Sizeof(off)), nil, 0, &ret, nil, 0)
+	}()
+
+	fmt.Printf("Снифер запущен на интерфейсе %s", ip)
+
+	// 4. Читаем пакеты в цикле
+	buf := make([]byte, 65535) // максимальный размер IP-пакета
+	for i := 1; ; i++ { 
+		// Описание буфера для винды 
+		wsaBuf := syscall.WSABuf{Len: uint32(len(buf)), Buf: &buf[0]}
+		// Переменная для ответа
+		var n, flags uint32
+		// Получение ответа
+		if err := syscall.WSARecv(sock, &wsaBuf, 1, &n, &flags, nil, nil); err != nil {
+			fmt.Println("Ошибка чтения:", err)
+			return
+		}
+
+
+		packet := buf[:n]
+		fmt.Printf("#%d  %s  длина: %d байт\n", i, time.Now().Format("15:04:05.000"), n)
+		fmt.Printf("% x\n\n", packet) // весь пакет: сырые байты в hex через пробел
+	}
+}
